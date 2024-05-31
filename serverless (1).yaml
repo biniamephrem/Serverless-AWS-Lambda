@@ -1,0 +1,210 @@
+service: claims-test-sf
+
+provider:
+  name: aws
+  runtime: python3.11
+  region: us-west-2
+  logRetentionInDays: 30
+  tags:
+    Project: ${self:service}-${opt:stage, sls:stage, 'dev'}
+
+  apiGateway:
+    shouldStartNameWithService: true
+    minimumCompressionSize: 1024
+  httpApi:
+    payload: '1.0'
+    cors: true
+
+
+
+  iam:
+    role:
+      name: ${self:service}-${opt:stage, sls:stage, 'dev'}-${self:provider.region}-lambda-role
+      statements:
+        - 
+          Effect: Allow
+          Action:
+            - dynamodb:Query
+            - dynamodb:PutItem
+            - dynamodb:UpdateItem
+          Resource: !GetAtt ClaimsTable.Arn
+        -
+          Effect: Allow
+          Action:
+            - states:StartExecution
+          Resource:
+            - !Sub "arn:aws:states:${self:provider.region}:${AWS::AccountId}:stateMachine:${self:service}-${opt:stage, sls:stage, 'dev'}-orchestrate-claim-flow"
+
+plugins:
+  - serverless-step-functions
+
+
+
+
+package:
+  individually: true
+  patterns:
+    - '!**'
+    - 'src/services/**'
+
+
+
+
+stepFunctions:
+  stateMachines:
+    OrchestrateClaimFlow:
+      name: ${self:service}-${opt:stage, sls:stage, 'dev'}-orchestrate-claim-flow
+      dependsOn:
+        - OrchestrateClaimFlowRole
+      role: !GetAtt OrchestrateClaimFlowRole.Arn
+      definition:
+        StartAt: StartingPoint
+        States:
+          StartingPoint:
+            Type: Pass
+            Next: RunTransactionPull
+
+          RunTransactionPull:
+            Type: Task
+            Resource: !GetAtt CheckForTransactionExistance.Arn
+            Parameters:
+              transaction_id.$: "$.transaction_id"
+            ResultPath: "$.TransactionDetails"
+            Next: CheckForTransactionExistanceChoice
+
+          CheckForTransactionExistanceChoice:
+            Type: Choice
+            Choices: 
+              -
+                Variable: "$.TransactionDetails"
+                IsNull: true
+                Next: NonExistingTransaction
+            
+            Default: ClosingPoint
+            # Rules processing
+
+
+          NonExistingTransaction:
+            Type: Pass
+            Next: ClosingPoint
+
+          ClosingPoint:
+            Type: Pass
+            End: true
+
+
+
+functions:
+  PlaceTransaction:
+    handler: src/place-transaction.handler
+    name: ${self:service}-${opt:stage, sls:stage, 'dev'}-place-transaction
+    timeout: 25
+    environment:
+      CLAIMS_TABLE_NAME: ${self:service}-${opt:stage, sls:stage, 'dev'}-claims
+      ENV: ${opt:stage, sls:stage, 'dev'}
+    package:
+      individually: true
+      patterns:
+        - 'src/place-transaction.py'
+    events:
+      -
+        httpApi:
+          path: /transactions
+          method: POST
+
+
+  ClaimEntryPoint:
+    handler: src/claim-entry-point.handler
+    name: ${self:service}-${opt:stage, sls:stage, 'dev'}-claim-entry-point
+    timeout: 25
+    environment:
+      ORCHESTRATION_STATE_MACHINE_ARN: !Sub "arn:aws:states:${self:provider.region}:${AWS::AccountId}:stateMachine:${self:service}-${opt:stage, sls:stage, 'dev'}-orchestrate-claim-flow"
+      CLAIMS_TABLE_NAME: ${self:service}-${opt:stage, sls:stage, 'dev'}-claims
+      ENV: ${opt:stage, sls:stage, 'dev'}
+    package:
+      individually: true
+      patterns:
+        - 'src/claim-entry-point.py'
+    events:
+      -
+        httpApi:
+          path: /claims
+          method: POST
+
+
+  CheckForTransactionExistance:
+    handler: src/check-for-transaction-existance.handler
+    name: ${self:service}-${opt:stage, sls:stage, 'dev'}-check-for-transaction-existance
+    timeout: 25
+    environment:
+      CLAIMS_TABLE_NAME: ${self:service}-${opt:stage, sls:stage, 'dev'}-claims
+      ENV: ${opt:stage, sls:stage, 'dev'}
+    package:
+      individually: true
+      patterns:
+        - 'src/check-for-transaction-existance.py'
+
+
+
+
+
+
+resources:
+  Resources:
+
+    ClaimsTable:
+      Type: AWS::DynamoDB::Table
+      # DeletionPolicy: Retain
+      Properties:
+        TableName: ${self:service}-${opt:stage, sls:stage, 'dev'}-claims
+        BillingMode: PAY_PER_REQUEST
+        TimeToLiveSpecification:
+          AttributeName: ttl
+          Enabled: true
+        AttributeDefinitions:
+          -
+            AttributeName: PK
+            AttributeType: S
+          -
+            AttributeName: SK
+            AttributeType: S
+        KeySchema:
+          -
+            AttributeName: PK
+            KeyType: HASH
+          -
+            AttributeName: SK
+            KeyType: RANGE
+        Tags:
+          -
+            Key: Project
+            Value: ${self:service}-${opt:stage, sls:stage, 'dev'}
+
+    OrchestrateClaimFlowRole:
+      Type: AWS::IAM::Role
+      Properties:
+        RoleName: ${self:service}-${opt:stage, sls:stage, 'dev'}-orchestrate-claim-flow-role-${self:provider.region}
+        Path: '/'
+        AssumeRolePolicyDocument:
+          Statement:
+            -
+              Effect: Allow
+              Principal:
+                Service:
+                  - states.amazonaws.com
+                  - lambda.amazonaws.com
+              Action:
+                - sts:AssumeRole
+        Policies:
+          -
+            PolicyName: ${self:service}-${opt:stage, sls:stage, 'dev'}-orchestrate-claim-flow-role-${self:provider.region}-policy
+            PolicyDocument:
+              Version: '2012-10-17'
+              Statement:
+                -
+                  Effect: Allow
+                  Action:
+                    - lambda:InvokeFunction
+                  Resource:
+                    - !Sub "arn:aws:lambda:${self:provider.region}:${AWS::AccountId}:function:${self:service}-${opt:stage, sls:stage, 'dev'}-check-for-transaction-existance"
+
