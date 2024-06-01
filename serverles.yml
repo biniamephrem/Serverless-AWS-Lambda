@@ -1,0 +1,283 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Resources:
+  LambdaExecutionRole:
+    Type: 'AWS::IAM::Role'
+    Properties: 
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: 'Allow'
+            Principal:
+              Service: 'lambda.amazonaws.com'
+            Action: 'sts:AssumeRole'
+      Policies:
+        - PolicyName: 'LambdaExecutionPolicy'
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: 'Allow'
+                Action:
+                  - 'logs:CreateLogGroup'
+                  - 'logs:CreateLogStream'
+                  - 'logs:PutLogEvents'
+                Resource: '*'
+              - Effect: 'Allow'
+                Action:
+                  - 'dynamodb:PutItem'
+                  - 'dynamodb:UpdateItem'
+                  - 'dynamodb:GetItem'
+                Resource: 'arn:aws:dynamodb:REGION:ACCOUNT_ID:table/*'
+
+  StepFunctionsExecutionRole:
+    Type: 'AWS::IAM::Role'
+    Properties: 
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: 'Allow'
+            Principal:
+              Service: 'states.amazonaws.com'
+            Action: 'sts:AssumeRole'
+      Policies:
+        - PolicyName: 'StepFunctionsExecutionPolicy'
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: 'Allow'
+                Action: 'lambda:InvokeFunction'
+                Resource: 'arn:aws:lambda:REGION:ACCOUNT_ID:function:*'
+
+  ApiGatewayExecutionRole:
+    Type: 'AWS::IAM::Role'
+    Properties: 
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: 'Allow'
+            Principal:
+              Service: 'apigateway.amazonaws.com'
+            Action: 'sts:AssumeRole'
+      Policies:
+        - PolicyName: 'ApiGatewayExecutionPolicy'
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: 'Allow'
+                Action: 'states:StartExecution'
+                Resource: 'arn:aws:states:REGION:ACCOUNT_ID:stateMachine:*'
+
+  CreditCardProcessingLambda:
+    Type: 'AWS::Lambda::Function'
+    Properties:
+      Handler: 'credit_card_processing.lambda_handler'
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          
+          dynamodb = boto3.resource('dynamodb')
+          transaction_table = dynamodb.Table('TransactionTable')
+          
+          def lambda_handler(event, context):
+              transaction_status = "approved"  # Simplified validation
+              transaction_record = {
+                  'transaction_id': event['transaction_id'],
+                  'UserName': event['UserName'],
+                  'amount': event['amount'],
+                  'item_name': event['item_name'],
+                  'vendor': event['vendor'],
+                  'credit_card': event['credit_card'],
+                  'exp_date': event['exp_date'],
+                  'CVC': event['CVC'],
+                  'datetime': event['datetime'],
+                  'status': transaction_status
+              }
+              transaction_table.put_item(Item=transaction_record)
+              
+              return {
+                  'statusCode': 200,
+                  'body': json.dumps({
+                      'transaction_status': transaction_status
+                  })
+              }
+      Runtime: python3.9
+      Timeout: 15
+
+  ClaimProcessingLambda:
+    Type: 'AWS::Lambda::Function'
+    Properties:
+      Handler: 'claim_processing.lambda_handler'
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          
+          dynamodb = boto3.resource('dynamodb')
+          claim_table = dynamodb.Table('ClaimTable')
+          
+          def lambda_handler(event, context):
+              claim_status = "processed"
+              claim_record = {
+                  'transaction_id': event['transaction_id'],
+                  'ClaimAmount': event['ClaimAmount'],
+                  'claim_reason': event['claim_reason'],
+                  'vendor': event['vendor_claims']['vendor_name'],
+                  'credit_card': event['vendor_claims']['credit_card'],
+                  'exp_date': event['vendor_claims']['exp_date'],
+                  'status': claim_status
+              }
+              claim_table.put_item(Item=claim_record)
+              
+              return {
+                  'statusCode': 200,
+                  'body': json.dumps({
+                      'claim_status': claim_status
+                  })
+              }
+      Runtime: python3.9
+      Timeout: 15
+
+  RoleEngineValidationLambda:
+    Type: 'AWS::Lambda::Function'
+    Properties:
+      Handler: 'role_engine_validation.lambda_handler'
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          from datetime import datetime
+          
+          dynamodb = boto3.resource('dynamodb')
+          validation_table = dynamodb.Table('ValidationTable')
+          claim_table = dynamodb.Table('ClaimTable')
+          transaction_table = dynamodb.Table('TransactionTable')
+          
+          def lambda_handler(event, context):
+              validation_status = "valid"
+              message = "All checks passed."
+              
+              # Check if transaction ID is valid UUID and exists
+              if not is_valid_uuid(event['transaction_id']):
+                  validation_status = "invalid"
+                  message = "Invalid transaction ID."
+              else:
+                  transaction = transaction_table.get_item(Key={'transaction_id': event['transaction_id']})
+                  if 'Item' not in transaction:
+                      validation_status = "invalid"
+                      message = "Transaction ID does not exist."
+                  else:
+                      transaction = transaction['Item']
+                      # Additional validations
+                      if transaction['amount'] != event['ClaimAmount']:
+                          validation_status = "invalid"
+                          message = "Claim amount does not match transaction amount."
+                      # Add more validations as needed
+              
+              validation_record = {
+                  'transaction_id': event['transaction_id'],
+                  'validation_status': validation_status,
+                  'message': message,
+                  'timestamp': datetime.utcnow().isoformat()
+              }
+              validation_table.put_item(Item=validation_record)
+              
+              return {
+                  'statusCode': 200,
+                  'body': json.dumps({
+                      'validation_status': validation_status,
+                      'message': message
+                  })
+              }
+          
+          def is_valid_uuid(uuid_str):
+              try:
+                  uuid_obj = uuid.UUID(uuid_str, version=4)
+              except ValueError:
+                  return False
+              return str(uuid_obj) == uuid_str
+      Runtime: python3.9
+      Timeout: 15
+
+  StateMachine:
+    Type: 'AWS::StepFunctions::StateMachine'
+    Properties:
+      DefinitionString: !Sub |
+        {
+          "Comment": "Claim processing state machine",
+          "StartAt": "ClaimProcessing",
+          "States": {
+            "ClaimProcessing": {
+              "Type": "Task",
+              "Resource": "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:ClaimProcessing",
+              "Next": "RoleEngineValidation"
+            },
+            "RoleEngineValidation": {
+              "Type": "Task",
+              "Resource": "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:RoleEngineValidation",
+              "End": true
+            }
+          }
+        }
+      RoleArn: !GetAtt StepFunctionsExecutionRole.Arn
+
+  APIGateway:
+    Type: 'AWS::ApiGateway::RestApi'
+    Properties:
+      Name: 'ClaimProcessingAPI'
+
+  TransactionApiResource:
+    Type: 'AWS::ApiGateway::Resource'
+    Properties:
+      ParentId: !GetAtt APIGateway.RootResourceId
+      PathPart: 'transaction'
+      RestApiId: !Ref APIGateway
+
+  TransactionApiMethod:
+    Type: 'AWS::ApiGateway::Method'
+    Properties:
+      AuthorizationType: 'NONE'
+      HttpMethod: 'POST'
+      ResourceId: !Ref TransactionApiResource
+      RestApiId: !Ref APIGateway
+      Integration:
+        Type: 'AWS_PROXY'
+        IntegrationHttpMethod: 'POST'
+        Uri: !Sub |
+          arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:CreditCardProcessing/invocations
+
+  ClaimApiResource:
+    Type: 'AWS::ApiGateway::Resource'
+    Properties:
+      ParentId: !GetAtt APIGateway.RootResourceId
+      PathPart: 'claim'
+      RestApiId: !Ref APIGateway
+
+  ClaimApiMethod:
+    Type: 'AWS::ApiGateway::Method'
+    Properties:
+      AuthorizationType: 'NONE'
+      HttpMethod: 'POST'
+      ResourceId: !Ref ClaimApiResource
+      RestApiId: !Ref APIGateway
+      Integration:
+        Type: 'AWS'
+        IntegrationHttpMethod: 'POST'
+        Uri: !Sub |
+          arn:aws:apigateway:${AWS::Region}:states:action/StartExecution
+        RequestTemplates:
+          application/json: |
+            {
+              "input": "$util.escapeJavaScript($input.body)",
+              "stateMachineArn": "arn:aws:states:${AWS::Region}:${AWS::AccountId}:stateMachine:ClaimProcessingStateMachine"
+            }
+        IntegrationResponses:
+          - StatusCode: '200'
+      MethodResponses:
+        - StatusCode: '200'
+
+  Deployment:
+    Type: 'AWS::ApiGateway::Deployment'
+    Properties

@@ -1,0 +1,17 @@
+{
+    "Comment": "Claim processing state machine",
+    "StartAt": "ClaimProcessing",
+    "States": {
+      "ClaimProcessing": {
+        "Type": "Task",
+        "Resource": "arn:aws:lambda:REGION:ACCOUNT_ID:function:ClaimProcessing",
+        "Next": "RoleEngineValidation"
+      },
+      "RoleEngineValidation": {
+        "Type": "Task",
+        "Resource": "arn:aws:lambda:REGION:ACCOUNT_ID:function:RoleEngineValidation",
+        "End": true
+      }
+    }
+  }
+  
