@@ -81,3 +81,56 @@ def lambda_handler(event, context):
     store_claim_in_dynamodb(claim_id, "Rejected", reason)
     notify_user(user_id, reason)
     send_response_to_claim_processor(claim_id, "Rejected", reason)
+-------------------------------------------------------------------------------------------------------------------------
+import json
+import boto3
+from datetime import datetime
+
+dynamodb = boto3.resource('dynamodb')
+validation_table = dynamodb.Table('ValidationTable')
+claim_table = dynamodb.Table('ClaimTable')
+transaction_table = dynamodb.Table('TransactionTable')
+
+def lambda_handler(event, context):
+    validation_status = "valid"
+    message = "All checks passed."
+    
+    # Check if transaction ID is valid UUID and exists
+    if not is_valid_uuid(event['transaction_id']):
+        validation_status = "invalid"
+        message = "Invalid transaction ID."
+    else:
+        transaction = transaction_table.get_item(Key={'transaction_id': event['transaction_id']})
+        if 'Item' not in transaction:
+            validation_status = "invalid"
+            message = "Transaction ID does not exist."
+        else:
+            transaction = transaction['Item']
+            # Additional validations
+            if transaction['amount'] != event['ClaimAmount']:
+                validation_status = "invalid"
+                message = "Claim amount does not match transaction amount."
+            # Add more validations as needed
+    
+    validation_record = {
+        'transaction_id': event['transaction_id'],
+        'validation_status': validation_status,
+        'message': message,
+        'timestamp': datetime.utcnow().isoformat()
+    }
+    validation_table.put_item(Item=validation_record)
+    
+    return {
+        'statusCode': 200,
+        'body': json.dumps({
+            'validation_status': validation_status,
+            'message': message
+        })
+    }
+
+def is_valid_uuid(uuid_str):
+    try:
+        uuid_obj = uuid.UUID(uuid_str, version=4)
+    except ValueError:
+        return False
+    return str(uuid_obj) == uuid_str
