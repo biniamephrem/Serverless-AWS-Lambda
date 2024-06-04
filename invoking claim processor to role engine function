@@ -1,0 +1,33 @@
+import boto3
+import json
+
+def lambda_handler(event, context):
+    # Initialize the Lambda client
+    lambda_client = boto3.client('lambda')
+    
+    # Define the payload for the second Lambda function
+    payload = {
+        "key1": "value1",
+        "key2": "value2"
+    }
+    
+    # Invoke another Lambda function
+    response = lambda_client.invoke(
+        FunctionName='arn:aws:lambda:REGION:ACCOUNT_ID:function:SECOND_LAMBDA_NAME',
+        InvocationType='RequestResponse',  # Use 'Event' for asynchronous
+        Payload=json.dumps(payload)
+    )
+    
+    # Read the response from the second Lambda function
+    response_payload = json.loads(response['Payload'].read())
+    
+    # Do something with the response
+    print("Received response:", response_payload)
+    
+    # Return a response or further process data
+    return {
+        "statusCode": 200,
+        "body": json.dumps({"message": "Data processed successfully", "response_from_second_lambda": response_payload})
+    }
+
+# Replace REGION, ACCOUNT_ID, and SECOND_LAMBDA_NAME with actual values
